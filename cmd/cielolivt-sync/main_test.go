@@ -15,6 +15,12 @@ func TestCleanTitleAndEpisode(t *testing.T) {
 	if got := episode(title); got != 99 {
 		t.Fatalf("episode = %d", got)
 	}
+	if got := episode("94.ねずみさんとてにみゅ"); got != 94 {
+		t.Fatalf("episode dotted = %d", got)
+	}
+	if got := episode("【#ストグラ】94.ねずみさんとてにみゅ"); got != 94 {
+		t.Fatalf("episode tagged dotted = %d", got)
+	}
 }
 
 func TestYouTubeKeepsTwitchDate(t *testing.T) {
@@ -38,6 +44,38 @@ func TestYouTubeKeepsTwitchDate(t *testing.T) {
 	}
 	if e.Source != "youtube" || e.YouTubeID != "youtube-id" || e.TwitchID != "2793230993" {
 		t.Fatalf("entry = %#v", e)
+	}
+}
+
+func TestSeasonlessYouTubeDoesNotPassSeasonFilter(t *testing.T) {
+	titles := []string{
+		"94.ねずみさんとてにみゅ",
+		"129.ねずみさんとカジノのけいひん",
+		"130.ねずみさんとホットドッグやさん",
+	}
+	for _, title := range titles {
+		if wanted(title, "ねずみさん", "season2") {
+			t.Fatalf("wanted accepted seasonless title %q", title)
+		}
+	}
+}
+
+func TestExtractYouTubeVideosFromVideoRenderer(t *testing.T) {
+	videos := extractYouTubeVideos(map[string]any{
+		"videoRenderer": map[string]any{
+			"videoId": "4qICkUzAPcA",
+			"title": map[string]any{
+				"runs": []any{
+					map[string]any{"text": "【#ストグラseason2】ねずみさんとけっこんテロ！？ #101"},
+				},
+			},
+		},
+	})
+	if len(videos) != 1 {
+		t.Fatalf("len = %d", len(videos))
+	}
+	if videos[0].ID != "4qICkUzAPcA" || episode(videos[0].Title) != 101 {
+		t.Fatalf("video = %#v", videos[0])
 	}
 }
 

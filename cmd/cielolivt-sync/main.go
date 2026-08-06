@@ -54,7 +54,7 @@ func main() {
 		season       = flag.String("season", "season2", "optional season substring filter; empty disables")
 		fetchYT      = flag.Bool("youtube", true, "fetch YouTube archives")
 		fetchTW      = flag.Bool("twitch", true, "fetch Twitch VODs")
-		maxYTPages   = flag.Int("youtube-pages", 8, "maximum YouTube continuation pages")
+		maxYTPages   = flag.Int("youtube-pages", 80, "maximum YouTube continuation pages")
 		twitchLimit  = flag.Int("twitch-limit", 50, "Twitch VOD fetch limit")
 		unknownMonth = flag.String("unknown-month", "未確認", "region name for yyyy/mm/dd rows")
 	)
@@ -412,8 +412,16 @@ func fetchYouTube(ctx context.Context, videosURL string, maxPages int) ([]Video,
 		clientVersion = "2.20260708.01.00"
 	}
 	out := extractYouTubeVideos(data)
-	token := continuationToken(data)
-	for i := 0; token != "" && i < maxPages; i++ {
+	tokens := continuationTokens(data)
+	seenTokens := map[string]bool{}
+	for pages := 0; len(tokens) > 0 && pages < maxPages; {
+		token := tokens[0]
+		tokens = tokens[1:]
+		if token == "" || seenTokens[token] {
+			continue
+		}
+		seenTokens[token] = true
+		pages++
 		payload := map[string]any{
 			"context": map[string]any{
 				"client": map[string]any{"clientName": "WEB", "clientVersion": clientVersion},
@@ -425,7 +433,7 @@ func fetchYouTube(ctx context.Context, videosURL string, maxPages int) ([]Video,
 			return nil, err
 		}
 		out = append(out, extractYouTubeVideos(page)...)
-		token = continuationToken(page)
+		tokens = append(tokens, continuationTokens(page)...)
 	}
 	return dedupeVideos(out), nil
 }
@@ -434,41 +442,55 @@ func extractYouTubeVideos(root any) []Video {
 	var out []Video
 	walk(root, func(m map[string]any) {
 		rich, ok := asMap(m["richItemRenderer"])
-		if !ok {
+		if ok {
+			content, ok := asMap(rich["content"])
+			if !ok {
+				return
+			}
+			lockup, ok := asMap(content["lockupViewModel"])
+			if !ok {
+				return
+			}
+			title := digString(lockup, "metadata", "lockupMetadataViewModel", "title", "content")
+			id := digString(lockup, "rendererContext", "commandContext", "onTap", "innertubeCommand", "watchEndpoint", "videoId")
+			if id != "" && title != "" {
+				out = append(out, Video{ID: id, Title: title, Source: "youtube"})
+			}
 			return
 		}
-		content, ok := asMap(rich["content"])
-		if !ok {
-			return
-		}
-		lockup, ok := asMap(content["lockupViewModel"])
-		if !ok {
-			return
-		}
-		title := digString(lockup, "metadata", "lockupMetadataViewModel", "title", "content")
-		id := digString(lockup, "rendererContext", "commandContext", "onTap", "innertubeCommand", "watchEndpoint", "videoId")
-		if id != "" && title != "" {
-			out = append(out, Video{ID: id, Title: title, Source: "youtube"})
+		video, ok := asMap(m["videoRenderer"])
+		if ok {
+			id := stringField(video, "videoId")
+			title := textField(video["title"])
+			if id != "" && title != "" {
+				out = append(out, Video{ID: id, Title: title, Source: "youtube"})
+			}
 		}
 	})
 	return out
 }
 
 func continuationToken(root any) string {
-	var token string
+	tokens := continuationTokens(root)
+	if len(tokens) == 0 {
+		return ""
+	}
+	return tokens[0]
+}
+
+func continuationTokens(root any) []string {
+	var tokens []string
 	walk(root, func(m map[string]any) {
-		if token != "" {
-			return
-		}
 		cmd, ok := asMap(m["continuationCommand"])
 		if !ok {
 			return
 		}
 		if s, ok := cmd["token"].(string); ok {
-			token = s
+			tokens = append(tokens, s)
 		}
 	})
-	return token
+	sort.Strings(tokens)
+	return tokens
 }
 
 func dedupeVideos(videos []Video) []Video {
@@ -664,6 +686,36 @@ func digString(root map[string]any, path ...string) string {
 	return s
 }
 
+func stringField(root map[string]any, key string) string {
+	s, _ := root[key].(string)
+	return s
+}
+
+func textField(v any) string {
+	m, ok := asMap(v)
+	if !ok {
+		return ""
+	}
+	if s, ok := m["simpleText"].(string); ok {
+		return s
+	}
+	runs, ok := m["runs"].([]any)
+	if !ok {
+		return ""
+	}
+	var b strings.Builder
+	for _, run := range runs {
+		rm, ok := asMap(run)
+		if !ok {
+			continue
+		}
+		if s, ok := rm["text"].(string); ok {
+			b.WriteString(s)
+		}
+	}
+	return b.String()
+}
+
 func firstMatch(s, expr string) string {
 	m := regexp.MustCompile(expr).FindStringSubmatch(s)
 	if len(m) < 2 {
@@ -685,7 +737,7 @@ func wanted(title, include, season string) bool {
 var (
 	bracketPrefix = regexp.MustCompile(`^【[^】]*】\s*`)
 	episodeSuffix = regexp.MustCompile(`\s*#\d+(?:[-ー－―]?[①-⑳0-9]+)?\s*$`)
-	episodeRe     = regexp.MustCompile(`#(\d+)`)
+	episodeRe     = regexp.MustCompile(`(?:#|^)(\d+)(?:[.．])?`)
 	spaceRe       = regexp.MustCompile(`\s+`)
 )
 
@@ -700,6 +752,9 @@ func cleanTitle(title string) string {
 }
 
 func episode(title string) int {
+	title = html.UnescapeString(title)
+	title = strings.TrimSpace(title)
+	title = bracketPrefix.ReplaceAllString(title, "")
 	m := episodeRe.FindStringSubmatch(title)
 	if len(m) < 2 {
 		return 0

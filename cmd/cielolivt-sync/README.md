@@ -22,7 +22,7 @@ go run . \
 ## よく使うオプション
 
 ```sh
-go run . -youtube-pages 10 -twitch-limit 50
+go run . -youtube-pages 80 -twitch-limit 50
 go run . -youtube=false
 go run . -twitch=false
 ```
