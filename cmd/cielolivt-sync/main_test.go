@@ -21,6 +21,12 @@ func TestCleanTitleAndEpisode(t *testing.T) {
 	if got := episode("【#ストグラ】94.ねずみさんとてにみゅ"); got != 94 {
 		t.Fatalf("episode tagged dotted = %d", got)
 	}
+	if got := cleanTitle("【#ストグラseason2】ねずみさんとダンスれんしゅう #125-②"); got != "ねずみさんとダンスれんしゅう②" {
+		t.Fatalf("cleanTitle split = %q", got)
+	}
+	if got := keyFor("ねずみさんとダンスれんしゅう②", 125); got != "ep:125:part:02" {
+		t.Fatalf("keyFor split = %q", got)
+	}
 }
 
 func TestYouTubeKeepsTwitchDate(t *testing.T) {
@@ -44,6 +50,33 @@ func TestYouTubeKeepsTwitchDate(t *testing.T) {
 	}
 	if e.Source != "youtube" || e.YouTubeID != "youtube-id" || e.TwitchID != "2793230993" {
 		t.Fatalf("entry = %#v", e)
+	}
+}
+
+func TestSplitEpisodeKeepsMultipleParts(t *testing.T) {
+	entries := map[string]Entry{}
+	upsertTwitch(entries, Video{
+		ID:    "twitch-1",
+		Title: "【#ストグラseason2】ねずみさんとダンスれんしゅう #125-①",
+	})
+	upsertTwitch(entries, Video{
+		ID:    "twitch-2",
+		Title: "【#ストグラseason2】ねずみさんとダンスれんしゅう #125-②",
+	})
+	if len(entries) != 2 {
+		t.Fatalf("len = %d entries = %#v", len(entries), entries)
+	}
+	upsertYouTube(entries, Video{
+		ID:    "youtube-2",
+		Title: "【#ストグラseason2】ねずみさんとダンスれんしゅう #125-②",
+	})
+	first := entries["ep:125:part:01"]
+	second := entries["ep:125:part:02"]
+	if first.TwitchID != "twitch-1" || first.YouTubeID != "" {
+		t.Fatalf("first = %#v", first)
+	}
+	if second.TwitchID != "twitch-2" || second.YouTubeID != "youtube-2" {
+		t.Fatalf("second = %#v", second)
 	}
 }
 

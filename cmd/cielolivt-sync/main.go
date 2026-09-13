@@ -155,6 +155,8 @@ func stateIndex(st State) map[string]Entry {
 	for _, e := range st.Entries {
 		if e.Key == "" {
 			e.Key = keyFor(e.Title, e.Episode)
+		} else if key := keyFor(e.Title, e.Episode); strings.HasPrefix(e.Key, "ep:") && key != e.Key {
+			e.Key = key
 		}
 		out[e.Key] = e
 	}
@@ -167,10 +169,9 @@ func upsertTwitch(entries map[string]Entry, v Video) {
 	key := keyFor(title, ep)
 	e, ok := entries[key]
 	if !ok && ep != 0 {
-		titleKey := keyFor(title, 0)
-		if candidate, exists := entries[titleKey]; exists {
+		if candidate, candidateKey, exists := matchByEpisode(entries, title, ep); exists {
 			e = candidate
-			key = titleKey
+			key = candidateKey
 		}
 	}
 	if e.Key == "" {
@@ -192,6 +193,12 @@ func upsertTwitch(entries map[string]Entry, v Video) {
 		e.Source = "twitch"
 	}
 	e.LastSeenAt = time.Now().Format(time.RFC3339)
+	nextKey := keyFor(e.Title, e.Episode)
+	if nextKey != key {
+		delete(entries, key)
+		key = nextKey
+	}
+	e.Key = key
 	entries[key] = e
 }
 
@@ -201,13 +208,10 @@ func upsertYouTube(entries map[string]Entry, v Video) {
 	key := keyFor(title, ep)
 	e, ok := entries[key]
 	if !ok && ep != 0 {
-		for _, candidate := range entries {
-			if candidate.Episode == ep {
-				e = candidate
-				key = candidate.Key
-				ok = true
-				break
-			}
+		if candidate, candidateKey, exists := matchByEpisode(entries, title, ep); exists {
+			e = candidate
+			key = candidateKey
+			ok = true
 		}
 	}
 	if !ok && ep != 0 {
@@ -230,6 +234,12 @@ func upsertYouTube(entries map[string]Entry, v Video) {
 	e.YouTubeID = v.ID
 	e.Source = "youtube"
 	e.LastSeenAt = time.Now().Format(time.RFC3339)
+	nextKey := keyFor(e.Title, e.Episode)
+	if nextKey != key {
+		delete(entries, key)
+		key = nextKey
+	}
+	e.Key = key
 	entries[key] = e
 }
 
@@ -240,13 +250,10 @@ func mergeSeed(entries map[string]Entry, seed Entry) {
 	}
 	e, ok := entries[key]
 	if !ok && seed.Episode != 0 {
-		for _, candidate := range entries {
-			if candidate.Episode == seed.Episode {
-				e = candidate
-				key = candidate.Key
-				ok = true
-				break
-			}
+		if candidate, candidateKey, exists := matchByEpisode(entries, seed.Title, seed.Episode); exists {
+			e = candidate
+			key = candidateKey
+			ok = true
 		}
 	}
 	if !ok {
@@ -270,7 +277,38 @@ func mergeSeed(entries map[string]Entry, seed Entry) {
 	if e.Source == "" {
 		e.Source = seed.Source
 	}
+	nextKey := keyFor(e.Title, e.Episode)
+	if nextKey != key {
+		delete(entries, key)
+		key = nextKey
+	}
+	e.Key = key
 	entries[key] = e
+}
+
+func matchByEpisode(entries map[string]Entry, title string, ep int) (Entry, string, bool) {
+	part := titlePart(title)
+	var fallback Entry
+	fallbackKey := ""
+	fallbackCount := 0
+	for key, candidate := range entries {
+		if candidate.Episode != ep {
+			continue
+		}
+		if part != "" && titlePart(candidate.Title) == part {
+			return candidate, key, true
+		}
+		if normalizeTitle(candidate.Title) == normalizeTitle(title) {
+			return candidate, key, true
+		}
+		fallback = candidate
+		fallbackKey = key
+		fallbackCount++
+	}
+	if part == "" && fallbackCount == 1 {
+		return fallback, fallbackKey, true
+	}
+	return Entry{}, "", false
 }
 
 func sortedEntries(entries map[string]Entry) []Entry {
@@ -735,16 +773,21 @@ func wanted(title, include, season string) bool {
 }
 
 var (
-	bracketPrefix = regexp.MustCompile(`^【[^】]*】\s*`)
-	episodeSuffix = regexp.MustCompile(`\s*#\d+(?:[-ー－―]?[①-⑳0-9]+)?\s*$`)
-	episodeRe     = regexp.MustCompile(`(?:#|^)(\d+)(?:[.．])?`)
-	spaceRe       = regexp.MustCompile(`\s+`)
+	bracketPrefix       = regexp.MustCompile(`^【[^】]*】\s*`)
+	episodePartSuffixRe = regexp.MustCompile(`\s*#\d+[-ー－―]?([①-⑳])\s*$`)
+	episodeSuffix       = regexp.MustCompile(`\s*#\d+(?:[-ー－―]?[①-⑳0-9]+)?\s*$`)
+	episodeRe           = regexp.MustCompile(`(?:#|^)(\d+)(?:[.．])?`)
+	partSuffixRe        = regexp.MustCompile(`([①-⑳])\s*$`)
+	spaceRe             = regexp.MustCompile(`\s+`)
 )
 
 func cleanTitle(title string) string {
 	title = html.UnescapeString(title)
 	title = strings.TrimSpace(title)
 	title = bracketPrefix.ReplaceAllString(title, "")
+	if m := episodePartSuffixRe.FindStringSubmatch(title); len(m) >= 2 {
+		title = episodePartSuffixRe.ReplaceAllString(title, m[1])
+	}
 	title = episodeSuffix.ReplaceAllString(title, "")
 	title = strings.TrimSpace(title)
 	title = spaceRe.ReplaceAllString(title, " ")
@@ -764,9 +807,68 @@ func episode(title string) int {
 
 func keyFor(title string, ep int) string {
 	if ep != 0 {
+		if part := titlePart(title); part != "" {
+			return fmt.Sprintf("ep:%03d:%s", ep, part)
+		}
 		return fmt.Sprintf("ep:%03d", ep)
 	}
 	return "title:" + normalizeTitle(title)
+}
+
+func titlePart(title string) string {
+	title = cleanTitle(title)
+	m := partSuffixRe.FindStringSubmatch(title)
+	if len(m) < 2 {
+		return ""
+	}
+	return fmt.Sprintf("part:%02d", circledNumber(m[1]))
+}
+
+func circledNumber(s string) int {
+	switch s {
+	case "①":
+		return 1
+	case "②":
+		return 2
+	case "③":
+		return 3
+	case "④":
+		return 4
+	case "⑤":
+		return 5
+	case "⑥":
+		return 6
+	case "⑦":
+		return 7
+	case "⑧":
+		return 8
+	case "⑨":
+		return 9
+	case "⑩":
+		return 10
+	case "⑪":
+		return 11
+	case "⑫":
+		return 12
+	case "⑬":
+		return 13
+	case "⑭":
+		return 14
+	case "⑮":
+		return 15
+	case "⑯":
+		return 16
+	case "⑰":
+		return 17
+	case "⑱":
+		return 18
+	case "⑲":
+		return 19
+	case "⑳":
+		return 20
+	default:
+		return 0
+	}
 }
 
 func normalizeTitle(title string) string {
